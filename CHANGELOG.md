@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Link watchdog: the board now notices a dropped WiFi association instead of sampling
+  `WiFi.RSSI()` forever, relearns the empty-room baseline when the link returns, and
+  reboots if the link stays down or the radio stops reporting usable readings.
+
 ## [1.0.0] - 2026-06-13
 
 ### Added

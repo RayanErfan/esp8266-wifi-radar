@@ -17,7 +17,9 @@
  *   - Web dashboard  : http://wifiradar.local  (live scope + recalibrate)
  *
  * WiFi setup: credentials are read from src/secrets.h (gitignored), so the
- * board connects to your network automatically on boot.
+ * board connects to your network automatically on boot. If the association
+ * drops later, the radar waits for it to come back, relearns its baseline on
+ * reconnect, and reboots rather than sitting on stale readings forever.
  */
 
 #include <ESP8266WiFi.h>
@@ -35,6 +37,8 @@ static const float    TRIP_FACTOR        = 2.2f;  // score to ENTER motion
 static const float    CLEAR_FACTOR       = 1.5f;  // score to LEAVE motion
 static const uint32_t MOTION_HOLD_MS     = 2000;  // min time held in MOTION
 static const float    MIN_BASELINE_STD   = 0.8f;  // floor so a dead-quiet room can't div-by-~0
+static const uint32_t WIFI_DOWN_REBOOT_MS = 60000;   // reboot once the link has been gone this long
+static const uint32_t STALE_REBOOT_MS     = 120000;  // reboot if no usable RSSI for this long
 
 // ------------------------- State -------------------------
 ESP8266WebServer server(80);
@@ -61,6 +65,13 @@ float    lastScore = 0;
 int32_t  lastRSSI = 0;
 
 uint32_t lastSampleMs = 0;
+
+// Link watchdog. The board is meant to run unattended, and WiFi.RSSI() is
+// meaningless without an association, so a dropped link would otherwise leave
+// every sample rejected by the validity guard and the readings frozen.
+bool     wifiDown = false;
+uint32_t wifiDownSince = 0;
+uint32_t lastGoodSampleMs = 0;    // last sample that passed the validity guard
 
 // ------------------------- Helpers -------------------------
 void pushSample(float v) {
@@ -92,6 +103,7 @@ void recalibrate() {
   calN = 0; calMean = 0; calM2 = 0; calCollected = 0;
   calibrated = false;
   motion = false;
+  lastGoodSampleMs = millis();      // restart the stale-reading watchdog
   digitalWrite(LED, HIGH);          // LED off (active-low)
   Serial.println(F("[cal] Hold still / leave the room for ~10 s..."));
 }
@@ -340,9 +352,40 @@ void loop() {
   if (now - lastSampleMs < SAMPLE_INTERVAL_MS) return;
   lastSampleMs = now;
 
+  // ---- link watchdog ----
+  // Without an association WiFi.RSSI() is meaningless, so sampling would just
+  // burn cycles and the dashboard would keep showing the last real reading.
+  if (WiFi.status() != WL_CONNECTED) {
+    if (!wifiDown) {
+      wifiDown = true;
+      wifiDownSince = now;
+      Serial.println(F("[wifi] link lost, waiting for it to return..."));
+    } else if (now - wifiDownSince > WIFI_DOWN_REBOOT_MS) {
+      Serial.println(F("[wifi] still down — restarting in 3 s."));
+      delay(3000);
+      ESP.restart();
+    }
+    return;
+  }
+  if (wifiDown) {
+    wifiDown = false;
+    Serial.println(F("[wifi] link back — relearning the empty-room baseline."));
+    recalibrate();
+    return;
+  }
+
   poke();
   int32_t rssi = WiFi.RSSI();
-  if (rssi >= 0 || rssi < -100) return;   // guard invalid readings
+  if (rssi >= 0 || rssi < -100) {   // guard invalid readings
+    // Associated but the radio has stopped reporting anything usable.
+    if (now - lastGoodSampleMs > STALE_REBOOT_MS) {
+      Serial.println(F("[rssi] no usable readings — restarting in 3 s."));
+      delay(3000);
+      ESP.restart();
+    }
+    return;
+  }
+  lastGoodSampleMs = now;
   lastRSSI = rssi;
   float x = (float)rssi;
   pushSample(x);
